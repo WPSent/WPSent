@@ -535,17 +535,17 @@ font-size:13px;font-weight:500;opacity:0;transition:opacity .2s;pointer-events:n
     <!-- cURL -->
     <div class="lang-panel" id="lang-curl">
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">Send a message</div>
-      <div class="code-block" id="curl-send">curl -X POST "http://localhost:3000/send?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY&to=8801711000000" \\
+      <div class="code-block" id="curl-send">curl -X POST "http://wpsent.xyz/send?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY&to=8801711000000" \\
   -H "Content-Type: application/json" \\
   -d '{"message": "Hello from WPSent!"}'
 <button class="code-copy" onclick="copyCode('curl-send')">copy</button></div>
 
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">Get logs</div>
-      <div class="code-block" id="curl-logs">curl "http://localhost:3000/logs?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY"
+      <div class="code-block" id="curl-logs">curl "http://wpsent.xyz/logs?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY"
 <button class="code-copy" onclick="copyCode('curl-logs')">copy</button></div>
 
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">Add webhook</div>
-      <div class="code-block" id="curl-wh">curl -X POST "http://localhost:3000/webhooks" \\
+      <div class="code-block" id="curl-wh">curl -X POST "http://wpsent.xyz/webhooks" \\
   -H "Content-Type: application/json" \\
   -H "x-client-id: YOUR_CLIENT_ID" \\
   -H "x-api-key: YOUR_SECRET_KEY" \\
@@ -553,7 +553,7 @@ font-size:13px;font-weight:500;opacity:0;transition:opacity .2s;pointer-events:n
 <button class="code-copy" onclick="copyCode('curl-wh')">copy</button></div>
 
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">Check status</div>
-      <div class="code-block" id="curl-status">curl "http://localhost:3000/status?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY"
+      <div class="code-block" id="curl-status">curl "http://wpsent.xyz/status?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY"
 <button class="code-copy" onclick="copyCode('curl-status')">copy</button></div>
     </div>
 
@@ -562,7 +562,7 @@ font-size:13px;font-weight:500;opacity:0;transition:opacity .2s;pointer-events:n
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">Send a message</div>
       <div class="code-block" id="node-send">// Using built-in fetch (Node 18+)
 const res = await fetch(
-  'http://localhost:3000/send?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY&to=8801711000000',
+  'http://wpsent.xyz/send?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY&to=8801711000000',
   {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -575,14 +575,14 @@ console.log(data); // { ok: true, logId: '...' }
 
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">Get logs</div>
       <div class="code-block" id="node-logs">const res = await fetch(
-  'http://localhost:3000/logs?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY'
+  'http://wpsent.xyz/logs?clientid=YOUR_CLIENT_ID&key=YOUR_SECRET_KEY'
 );
 const logs = await res.json();
 console.log(logs); // Array of last 100 messages
 <button class="code-copy" onclick="copyCode('node-logs')">copy</button></div>
 
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">Add webhook</div>
-      <div class="code-block" id="node-wh">const res = await fetch('http://localhost:3000/webhooks', {
+      <div class="code-block" id="node-wh">const res = await fetch('http://wpsent.xyz/webhooks', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
@@ -606,7 +606,7 @@ console.log(data.webhooks); // Updated webhook list
       <div class="code-block" id="py-send">import requests
 
 res = requests.post(
-    'http://localhost:3000/send',
+    'http://wpsent.xyz/send',
     params={
         'clientid': 'YOUR_CLIENT_ID',
         'key':      'YOUR_SECRET_KEY',
@@ -621,7 +621,7 @@ print(res.json())  # {'ok': True, 'logId': '...'}
       <div class="code-block" id="py-logs">import requests
 
 res = requests.get(
-    'http://localhost:3000/logs',
+    'http://wpsent.xyz/logs',
     params={'clientid': 'YOUR_CLIENT_ID', 'key': 'YOUR_SECRET_KEY'}
 )
 for msg in res.json():
