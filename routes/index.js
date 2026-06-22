@@ -195,8 +195,35 @@ function landingHTML() {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>WPSent · Connect</title>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="robots" content="index, follow"/>
+<meta name="googlebot" content="index, follow"/>
+<meta name="keywords" content="WhatsApp API, WhatsApp gateway, WhatsApp bot, send WhatsApp message API, self-hosted WhatsApp, WhatsApp webhook, WhatsApp REST API, WPSent, whatsapp-web.js, WhatsApp automation"/>
+<!-- Primary meta -->
+<title>WPSent · WhatsApp API Gateway</title>
+<meta name="description" content="Open-Source WhatsApp API gateway. Send messages, receive webhooks, and manage multiple accounts via REST API."/>
+<meta name="theme-color" content="#25d366"/>
+
+<!-- Open Graph (WhatsApp, Facebook, LinkedIn previews) -->
+<meta property="og:type" content="website"/>
+<meta property="og:title" content="WPSent · WhatsApp API Gateway"/>
+<meta property="og:description" content="Open-Source WhatsApp API gateway. Send messages, receive webhooks, and manage multiple accounts via REST API."/>
+<meta property="og:image" content="/og-image.png"/>
+<meta property="og:url" content="https://wpsent.xyz"/>
+
+<!-- Twitter card -->
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="WPSent · WhatsApp API Gateway"/>
+<meta name="twitter:description" content="Open-Source WhatsApp API gateway. Send messages, receive webhooks, and manage multiple accounts via REST API."/>
+<meta name="twitter:image" content="/og-image.png"/>
+
+<!-- Favicon — SVG (best, works everywhere modern) -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+<!-- Fallback for older browsers -->
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png"/>
+<link rel="apple-touch-icon" sizes="180x180" href="/favicon-180.png"/>
+
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#0d0d0d;--surface:#161616;--surface2:#1f1f1f;--border:#2a2a2a;

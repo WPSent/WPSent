@@ -16,7 +16,7 @@ if (!MONGO_URI) {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/', routes);
-
+app.use(express.static('public'));
 async function start() {
   try {
     await mongoose.connect(MONGO_URI, { dbName: 'wa_gateway' });
