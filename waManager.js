@@ -12,16 +12,33 @@ const qrCallbacks = new Map();  // phone → [fn, ...]
 
 //  browser auto-detection 
 
+function isRealBrowser(p) {
+  try {
+    // File must exist
+    execSync(`test -f "${p}"`, { stdio: 'ignore' });
+    // Must not be a snap stub — stubs contain the word "snap" in their output
+    const out = execSync(`"${p}" --version 2>&1 || true`, {
+      timeout: 3000,
+      encoding: 'utf8'
+    });
+    if (out.toLowerCase().includes('snap')) return false;
+    console.log(`[WA]  Browser found: ${p} (${out.trim()})`);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function findBrowser() {
   const candidates = [
-    // Linux — Chrome
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    // Linux — Chromium
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    // Nix (Railway nixpacks)
+    // Nix (Railway nixpacks) — check first, most reliable on Railway
     '/nix/var/nix/profiles/default/bin/chromium',
+    // Linux — Chrome (real binary, not a stub)
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    // Linux — Chromium real binary
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
     // macOS — Chrome
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     // macOS — Chromium
@@ -32,14 +49,10 @@ function findBrowser() {
   ];
 
   for (const p of candidates) {
-    try {
-      execSync(`test -f "${p}"`, { stdio: 'ignore' });
-      console.log(`[WA]  Browser found: ${p}`);
-      return p;
-    } catch (_) {}
+    if (isRealBrowser(p)) return p;
   }
 
-  console.log('[WA]  No system browser found — Puppeteer will use its bundled browser');
+  console.log('[WA]  No system browser found — using Puppeteer bundled Chromium');
   return null;
 }
 
@@ -47,7 +60,7 @@ const BROWSER_PATH = findBrowser();
 
 //  helpers 
 
-/** Strip all non-digit characters — handles +, spaces, dashes **/
+/** Strip all non-digit characters — handles +, spaces, dashes */
 function sanitizePhone(raw) {
   return String(raw).replace(/[^0-9]/g, '');
 }
@@ -104,7 +117,7 @@ function extractBody(msg) {
   return msg.body || '';
 }
 
-//  session factory ─
+//  session factory 
 
 function createSession(phone) {
   if (sessions.has(phone)) return sessions.get(phone);
@@ -157,7 +170,7 @@ function createSession(phone) {
 
   client.on('auth_failure', (msg) => {
     session.status = 'auth_failure';
-    console.error(`[WA] Auth failure for ${phone}:`, msg);
+    console.error(`[WA]  Auth failure for ${phone}:`, msg);
   });
 
   client.on('disconnected', (reason) => {
@@ -254,7 +267,7 @@ async function sendMessage(phone, to, body) {
 async function restoreAllSessions() {
   const users = await WpUser.find({});
   for (const u of users) {
-    console.log(`[WA] 🔄 Restoring session for ${u.phone}`);
+    console.log(`[WA]  Restoring session for ${u.phone}`);
     createSession(u.phone);
   }
 }
