@@ -1,5 +1,26 @@
+
 require('dotenv').config();
-const express  = require('express');
+
+process.on('uncaughtException', (err) => {
+  if (
+    err?.code === 'ENOENT' ||
+    err?.message?.includes('Target closed') ||
+    err?.message?.includes('TargetCloseError') ||
+    err?.message?.includes('Session closed') ||
+    err?.message?.includes('Protocol error')
+  ) {
+    console.error('[WARN] Recoverable error caught (session issue):', err.message);
+    return; // don't crash
+  }
+  // Real unknown error — log it but still don't crash
+  console.error('[ERROR] Uncaught exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[ERROR] Unhandled rejection:', reason?.message || reason);
+});
+const express      = require('express');
+const cookieParser = require('cookie-parser');
 const mongoose = require('mongoose');
 const wa       = require('./waManager');
 const routes   = require('./routes');
@@ -15,6 +36,7 @@ if (!MONGO_URI) {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 app.use('/', routes);
 app.use(express.static('public'));
 async function start() {

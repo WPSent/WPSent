@@ -1,5 +1,3 @@
-
-
 const { Client, RemoteAuth } = require('whatsapp-web.js');
 const { MongoStore }         = require('wwebjs-mongo');
 const mongoose               = require('mongoose');
@@ -7,8 +5,9 @@ const { WpUser, MessageLog } = require('./models');
 const axios                  = require('axios');
 const { execSync }           = require('child_process');
 
-const sessions    = new Map();  // phone → { client, status, qr }
-const qrCallbacks = new Map();  // phone → [fn, ...]
+const sessions     = new Map();  // phone → { client, status, qr }
+const qrCallbacks  = new Map();  // phone → [fn, ...]
+const logListeners = new Map();  // userId → [fn, ...]  (live dashboard SSE)
 
 //  browser auto-detection 
 
@@ -58,7 +57,7 @@ function findBrowser() {
 
 const BROWSER_PATH = findBrowser();
 
-//  helpers 
+//  helpers ─
 
 /** Strip all non-digit characters — handles +, spaces, dashes */
 function sanitizePhone(raw) {
@@ -75,17 +74,25 @@ async function pruneOldLogs(userId) {
   }
 }
 
-async function fireWebhooks(user, payload) {
-  const active = (user.webhooks || []).filter(w => w.active);
+async function fireWebhooks(userId, payload) {
+ 
+  const freshUser = await WpUser.findById(userId).lean();
+  if (!freshUser) return;
+  const active = (freshUser.webhooks || []).filter(w => w.active);
+  console.log(`[WH] Firing ${active.length} webhook(s) for user ${userId}`);
   for (const wh of active) {
     try {
       if (wh.method === 'POST') {
         await axios.post(wh.url, payload, { timeout: 8000 });
+        console.log(`[WH]  POST ${wh.url}`);
       } else {
         const params = new URLSearchParams(payload).toString();
         await axios.get(`${wh.url}?${params}`, { timeout: 8000 });
+        console.log(`[WH]  GET ${wh.url}`);
       }
-    } catch (_) { /* best-effort */ }
+    } catch (e) {
+      console.error(`[WH]  Failed ${wh.url}:`, e.message);
+    }
   }
 }
 
@@ -117,7 +124,7 @@ function extractBody(msg) {
   return msg.body || '';
 }
 
-//  session factory 
+//  session factory ─
 
 function createSession(phone) {
   if (sessions.has(phone)) return sessions.get(phone);
@@ -128,9 +135,10 @@ function createSession(phone) {
 
   const client = new Client({
     authStrategy: new RemoteAuth({
-      clientId:             phone,          // unique per user
-      store,                                // MongoDB backend
-      backupSyncIntervalMs: 60_000          // sync session every 60s
+      clientId:             phone,
+      store,
+      dataPath:             '/tmp',         
+      backupSyncIntervalMs: 300_000         
     }),
     puppeteer: {
       headless: true,
@@ -146,6 +154,11 @@ function createSession(phone) {
         '--disable-gpu'
       ]
     }
+  });
+
+  
+  client.pupPage?.on('error', (err) => {
+    console.error(`[WA] page error for ${phone}:`, err.message);
   });
 
   const session = { client, status: 'initializing', qr: null };
@@ -195,7 +208,9 @@ function createSession(phone) {
         from: msg.from, body, type: msgType, status: 'received'
       });
       await pruneOldLogs(user._id);
-      await fireWebhooks(user, {
+      // Push to live dashboard SSE
+      emitLog(user._id.toString(), log.toObject());
+      await fireWebhooks(user._id, {
         event: 'message_received',
         from:  msg.from.replace('@c.us', ''),
         body, type: msgType,
@@ -219,7 +234,8 @@ function createSession(phone) {
         body, type: 'reaction', status: 'received'
       });
       await pruneOldLogs(user._id);
-      await fireWebhooks(user, {
+      emitLog(user._id.toString(), log.toObject());
+      await fireWebhooks(user._id, {
         event: 'message_received',
         from:  (reaction.senderId || 'unknown').replace('@c.us', ''),
         body, type: 'reaction',
@@ -233,6 +249,19 @@ function createSession(phone) {
   client.initialize().catch(err => {
     console.error(`[WA] init error for ${phone}:`, err.message);
     session.status = 'error';
+    // Auto-retry on TargetCloseError (browser was killed)
+    if (err.message?.includes('Target closed') || err.message?.includes('ENOENT')) {
+      console.log(`[WA]  Auto-retrying session for ${phone} in 8s...`);
+      setTimeout(() => {
+        sessions.delete(phone);
+        createSession(phone);
+      }, 8000);
+    }
+  });
+
+  // Catch any stray error events on the client itself
+  client.on('error', (err) => {
+    console.error(`[WA] client error for ${phone}:`, err?.message || err);
   });
 
   return session;
@@ -272,8 +301,27 @@ async function restoreAllSessions() {
   }
 }
 
+//  live log emitter (for dashboard SSE) ─
+
+function onLog(userId, fn) {
+  if (!logListeners.has(userId)) logListeners.set(userId, []);
+  logListeners.get(userId).push(fn);
+}
+
+function offLog(userId, fn) {
+  if (!logListeners.has(userId)) return;
+  logListeners.set(userId, logListeners.get(userId).filter(f => f !== fn));
+}
+
+function emitLog(userId, log) {
+  (logListeners.get(userId) || []).forEach(fn => {
+    try { fn(log); } catch (_) {}
+  });
+}
+
 module.exports = {
   createSession, getSession, getStatus,
   onQR, offQR, sendMessage,
-  restoreAllSessions, pruneOldLogs, sanitizePhone
+  restoreAllSessions, pruneOldLogs, sanitizePhone,
+  onLog, offLog, emitLog
 };

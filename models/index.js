@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-//  WP User Schema 
+
 const wpUserSchema = new mongoose.Schema({
   phone:      { type: String, required: true, unique: true },
   clientId:   { type: String, required: true, unique: true },  // public identifier
@@ -17,7 +17,7 @@ const wpUserSchema = new mongoose.Schema({
   lastSeen:   { type: Date, default: Date.now }
 }, { collection: 'wpusers' });
 
-//  Message Log Schema 
+
 const messageLogSchema = new mongoose.Schema({
   userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'WpUser', required: true },
   direction: { type: String, enum: ['outbound','inbound'], required: true },
