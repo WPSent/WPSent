@@ -9,7 +9,21 @@ const sessions     = new Map();  // phone → { client, status, qr }
 const qrCallbacks  = new Map();  // phone → [fn, ...]
 const logListeners = new Map();  // userId → [fn, ...]  (live dashboard SSE)
 
-//  browser auto-detection 
+
+const _origEmit = process.emit.bind(process);
+process.emit = function(event, error, ...args) {
+  if (
+    event === 'uncaughtException' &&
+    error?.code === 'ENOENT' &&
+    error?.path?.includes('RemoteAuth-')
+  ) {
+    console.warn(`[WA]   Ignoring benign RemoteAuth zip error: ${error.path}`);
+    return true; // suppress — RemoteAuth recovers on next sync cycle
+  }
+  return _origEmit(event, error, ...args);
+};
+
+//  browser auto-detection
 
 function isRealBrowser(p) {
   try {
@@ -119,9 +133,15 @@ function extractBody(msg) {
   if (msg.type === 'video')    return '[Video]';
   if (msg.type === 'audio')    return '[Audio]';
   if (msg.type === 'document') return `[Document: ${msg.body || 'file'}]`;
-  if (msg.type === 'location') return `[Location: ${msg.location?.latitude},${msg.location?.longitude}]`;
+  if (msg.type === 'location') {
+    const lat = msg.location?.latitude  || '?';
+    const lng = msg.location?.longitude || '?';
+    return `[Location: ${lat},${lng}]`;
+  }
   if (msg.type === 'vcard')    return '[Contact card]';
-  return msg.body || '';
+ 
+  const body = msg.body || msg.caption || msg._data?.body || '';
+  return body || `[${msg.type || 'message'}]`;
 }
 
 //  session factory ─
@@ -137,8 +157,8 @@ function createSession(phone) {
     authStrategy: new RemoteAuth({
       clientId:             phone,
       store,
-      dataPath:             '/tmp',         
-      backupSyncIntervalMs: 300_000         
+      dataPath:             '/tmp',
+      backupSyncIntervalMs: 300_000
     }),
     puppeteer: {
       headless: true,
