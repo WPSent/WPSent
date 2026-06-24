@@ -308,9 +308,10 @@ async function sendMessage(phone, to, body) {
   const session = sessions.get(phone);
   if (!session || session.status !== 'ready')
     throw new Error('WhatsApp session not ready');
-  const clean = sanitizePhone(to);
-  if (!clean) throw new Error('Invalid phone number');
-  await session.client.sendMessage(clean + '@c.us', body);
+
+const clean = to.includes('@') ? to : sanitizePhone(to) + '@c.us';
+if (!clean || clean === '@c.us') throw new Error('Invalid phone number');
+await session.client.sendMessage(clean, body);
 }
 
 async function restoreAllSessions() {

@@ -142,7 +142,9 @@ router.get('/api/logs-stream', requireDashboard, (req, res) => {
 
 
 router.post('/send', requireKey, async (req, res) => {
-  const to      = wa.sanitizePhone(req.query.to || req.body.to || '');
+    const rawTo   = req.query.to || req.body.to || '';
+    const to = rawTo.includes('@') ? rawTo : wa.sanitizePhone(rawTo);
+
   const message = req.body.message || req.body.body || req.query.message || '';
   if (!to)      return res.status(400).json({ error: '`to` phone number required' });
   if (!message) return res.status(400).json({ error: '`message` body required' });
