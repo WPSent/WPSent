@@ -9,15 +9,16 @@ const wa = require('../waManager');
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS   = 15 * 60 * 1000; // 15 minutes
 
-
+ 
 const CONFIG = {
-  GITHUB_URL:    'https://github.com/YOUR_USERNAME/wpsent',
-  INSTAGRAM_URL: 'https://instagram.com/YOUR_INSTAGRAM',
+  GITHUB_URL:    'https://github.com/wpsent/wpsent',
+  INSTAGRAM_URL: 'https://instagram.com/adnanisagoodboy',
   EMAIL:         'your@email.com',
   SITE_URL:      'https://wpsent.xyz',
-  // Single-user mode: set to true to block new registrations after first user
+  // Single-user
   SINGLE_USER:   process.env.SINGLE_USER === 'true' || false,
 };
+
 
 function genClientId() { return 'cid_' + crypto.randomBytes(6).toString('hex'); }
 async function uniqueClientId() {
@@ -28,13 +29,16 @@ async function uniqueClientId() {
   throw new Error('Could not generate a unique client ID');
 }
 
+
 const str = (v) => (typeof v === 'string' ? v : (Array.isArray(v) ? String(v[0] ?? '') : '')).trim();
 
+// Constant-time comparison for secrets
 function safeEq(a, b) {
   const x = Buffer.from(String(a ?? '')), y = Buffer.from(String(b ?? ''));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
+// Express 4 doesn't catch rejected promises from async handlers (request just hangs).
 const ah = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch((e) => {
     console.error('[route error]', req.method, req.path, e);
@@ -42,6 +46,7 @@ const ah = (fn) => (req, res, next) =>
     res.status(500).json({ error: 'Internal server error' });
   });
 
+// ── sessions / pairing 
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const PAIR_TTL   = 10 * 60 * 1000;
 const cookieOpts = (req, maxAge) => ({ httpOnly: true, sameSite: 'lax', signed: true, secure: !!req.secure, maxAge });
@@ -59,6 +64,8 @@ async function userFromCookie(req) {
   return user && safeEq(keyTag(user), tag) ? user : null;
 }
 
+
+const pending = new Map();   // phone → { nonce, rotate, createdAt }
 function startPairing(req, res, phone, rotate) {
   for (const [p, v] of pending) if (Date.now() - v.createdAt > PAIR_TTL) pending.delete(p);
   const nonce = crypto.randomBytes(16).toString('hex');
@@ -78,14 +85,15 @@ async function rotateCredentials(phone) {
   return WpUser.findOneAndUpdate({ phone }, {
     clientId: await uniqueClientId(), apiKey: uuidv4(),
     loginAttempts: 0, lockedUntil: null,
-    webhooks: []           
+    webhooks: []            
   }, { new: true });
 }
 
-const resetCodes   = new Map();   
-const codeCooldown = new Map();   
 
+const resetCodes   = new Map();   // phone → { code, exp, attempts }
+const codeCooldown = new Map();   // phone → last request ms
 
+// ── middleware: REST API ─
 const requireKey = ah(async (req, res, next) => {
   const clientId = str(req.query.clientid || req.headers['x-client-id']);
   const key      = str(req.query.key      || req.headers['x-api-key']);
@@ -98,6 +106,7 @@ const requireKey = ah(async (req, res, next) => {
   next();
 });
 
+// ── middleware: dashboard (signed cookie only) 
 const requireDashboard = ah(async (req, res, next) => {
   const user = await userFromCookie(req);
   if (!user) {
@@ -110,9 +119,12 @@ const requireDashboard = ah(async (req, res, next) => {
   next();
 });
 
+
 router.get('/', (req, res) => res.send(landingHTML()));
 
+
 router.get('/docs', (req, res) => res.send(docsHTML()));
+
 
 router.post('/auth/start', ah(async (req, res) => {
   const phone = wa.sanitizePhone(str(req.body?.phone));
@@ -142,7 +154,7 @@ router.post('/auth/start', ah(async (req, res) => {
   try {
     await WpUser.create({ phone, clientId: await uniqueClientId(), apiKey: uuidv4() });
   } catch (e) {
-    
+    // two requests for the same new number at once -> duplicate key; treat as existing
     if (e && e.code === 11000) return res.json({ ok: true, phone, existing: true });
     throw e;
   }
@@ -150,6 +162,7 @@ router.post('/auth/start', ah(async (req, res) => {
   startPairing(req, res, phone, false);
   res.json({ ok: true, phone, existing: false });
 }));
+
 
 router.post('/auth/login', ah(async (req, res) => {
   const phone = wa.sanitizePhone(str(req.body?.phone));
@@ -182,6 +195,7 @@ router.post('/auth/login', ah(async (req, res) => {
   res.json({ ok: true, phone });
 }));
 
+
 router.post('/auth/reset', ah(async (req, res) => {
   const phone = wa.sanitizePhone(str(req.body?.phone));
   if (!phone) return res.status(400).json({ error: 'phone required' });
@@ -204,7 +218,7 @@ router.post('/auth/reset', ah(async (req, res) => {
     return res.json({ ok: true, mode: 'code' });
   }
 
-  // Not connected: make sure a session exists that will show a QR, then require a fresh scan.
+  // Not connected:
   if (st === 'auth_failure') await wa.destroySession(phone, { wipe: true });   // saved login is invalid
   else if (st === 'error')   await wa.destroySession(phone);
   if (wa.getStatus(phone) === 'not_started') wa.createSession(phone);
@@ -227,6 +241,7 @@ router.post('/auth/reset/confirm', ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+
 router.get('/auth/claim', ah(async (req, res) => {
   const p = getPairing(req);
   if (!p || wa.getPairedAt(p.phone) < p.createdAt) return res.redirect('/');   // no fresh scan → no login
@@ -237,6 +252,7 @@ router.get('/auth/claim', ah(async (req, res) => {
   setSession(req, res, user);
   res.redirect('/dashboard');
 }));
+
 
 router.get('/auth/qr-stream', (req, res) => {
   const p = getPairing(req);
@@ -269,11 +285,14 @@ router.get('/auth/qr-stream', (req, res) => {
   req.on('close', cleanup);
 });
 
+
 router.get('/dashboard', requireDashboard, (req, res) => {
   res.send(dashboardHTML(req.wpUser));
 });
 
+
 router.get('/logout', (req, res) => { res.clearCookie('wpsent_phone'); res.clearCookie('wpsent_pair'); res.redirect('/'); });
+
 
 router.get('/api/me', requireDashboard, ah(async (req, res) => {
   const logs = await MessageLog.find({ userId: req.wpUser._id }).sort({ timestamp: -1 }).limit(100).lean();
@@ -288,6 +307,7 @@ router.get('/api/me', requireDashboard, ah(async (req, res) => {
   });
 }));
 
+
 router.get('/api/logs-stream', requireDashboard, (req, res) => {
   res.setHeader('Content-Type',  'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -300,6 +320,7 @@ router.get('/api/logs-stream', requireDashboard, (req, res) => {
   const hb = setInterval(() => { try { res.write(': heartbeat\n\n'); } catch(_){} }, 10000);
   req.on('close', () => { clearInterval(hb); wa.offLog(uid, send); });
 });
+
 
 router.post('/send', requireKey, ah(async (req, res) => {
   const rawTo   = str(req.query.to || req.body?.to);
@@ -320,14 +341,17 @@ router.post('/send', requireKey, ah(async (req, res) => {
   res.json({ ok: true, logId: log._id });
 }));
 
+
 router.get('/logs', requireKey, ah(async (req, res) => {
   const logs = await MessageLog.find({ userId: req.wpUser._id }).sort({ timestamp: -1 }).limit(100);
   res.json(logs);
 }));
 
+
 router.get('/status', requireKey, (req, res) => {
   res.json({ phone: req.wpUser.phone, status: wa.getStatus(req.wpUser.phone) });
 });
+
 
 router.post('/webhooks', requireKey, ah(async (req, res) => {
   const url    = str(req.body?.url);
@@ -361,36 +385,11 @@ function landingHTML() {
 <title>WPSent - WhatsApp API Gateway</title>
 <meta name="description" content="Self-hosted WhatsApp API gateway. Send messages, receive webhooks, no fees ever."/>
 <meta name="robots" content="index, follow"/>
-<meta name="googlebot" content="index, follow"/>
-<meta name="keywords" content="WhatsApp API, WhatsApp gateway, WhatsApp bot, send WhatsApp message API, self-hosted WhatsApp, WhatsApp webhook, WhatsApp REST API, WPSent, whatsapp-web.js, WhatsApp automation"/>
-<!-- Primary meta -->
-<title>WPSent · WhatsApp API Gateway</title>
-<meta name="description" content="Open-Source WhatsApp API gateway. Send messages, receive webhooks, and manage multiple accounts via REST API."/>
-<meta name="keywords" content="WhatsApp API, WhatsApp gateway, WhatsApp bot, send WhatsApp message API, self-hosted WhatsApp, WhatsApp webhook, WhatsApp REST API, WPSent, whatsapp-web.js, WhatsApp automation"/>
-<!-- Primary meta -->
-<title>WPSent · WhatsApp API Gateway</title>
-<meta name="description" content="Open-Source WhatsApp API gateway. Send messages, receive webhooks, and manage multiple accounts via REST API."/>
+<meta name="keywords" content="WhatsApp API, WhatsApp gateway, self-hosted WhatsApp, WhatsApp webhook, WPSent"/>
 <meta name="theme-color" content="#25d366"/>
-
-<!-- Open Graph (WhatsApp, Facebook, LinkedIn previews) -->
-<meta property="og:type" content="website"/>
-<meta property="og:title" content="WPSent · WhatsApp API Gateway"/>
-<meta property="og:description" content="Open-Source WhatsApp API gateway. Send messages, receive webhooks, and manage multiple accounts via REST API."/>
-<meta property="og:image" content="/og-image.png"/>
-<meta property="og:url" content="https://wpsent.xyz"/>
-
-<!-- Twitter card -->
-<meta name="twitter:card" content="summary_large_image"/>
-<meta name="twitter:title" content="WPSent · WhatsApp API Gateway"/>
-<meta name="twitter:description" content="Open-Source WhatsApp API gateway. Send messages, receive webhooks, and manage multiple accounts via REST API."/>
-<meta name="twitter:image" content="/og-image.png"/>
-
-<!-- Favicon — SVG (best, works everywhere modern) -->
-<link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
-<!-- Fallback for older browsers -->
-<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png"/>
-<link rel="apple-touch-icon" sizes="180x180" href="/favicon-180.png"/>
-
+<meta property="og:title" content="WPSent - WhatsApp API Gateway"/>
+<meta property="og:description" content="Send WhatsApp messages via REST API. Free, self-hosted, open source."/>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%2325d366'/><polygon points='14,30 50,18 42,46 28,32' fill='%230d0d0d'/></svg>"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -487,7 +486,7 @@ footer a:hover{color:var(--text);}
 
   <div class="card">
 
-   
+    <!-- STEP: phone -->
     <div class="step active" id="s-phone">
       <h2>Get started</h2>
       <p class="hint">Enter your WhatsApp number to sign in or create an account.</p>
@@ -498,7 +497,7 @@ footer a:hover{color:var(--text);}
       <div class="err" id="err-phone"></div>
     </div>
 
-    
+    <!-- STEP: secret key login -->
     <div class="step" id="s-key">
       <h2>Enter your Secret Key</h2>
       <p class="hint">Your account exists. Paste your Secret Key to sign in.</p>
@@ -513,6 +512,7 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
+    <!-- STEP: locked -->
     <div class="step" id="s-locked">
       <h2>Account locked</h2>
       <p class="hint">Too many failed attempts.</p>
@@ -521,7 +521,7 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
-  
+    <!-- STEP: new user QR -->
     <div class="step" id="s-qr">
       <h2>Scan QR Code</h2>
       <p class="hint">Open WhatsApp &rarr; Linked Devices &rarr; Link a Device &rarr; scan.</p>
@@ -531,7 +531,7 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
-  
+    <!-- STEP: reset confirm -->
     <div class="step" id="s-reset">
       <h2>Reset account?</h2>
       <div class="warn-box">This creates a <b>new Client ID and Secret Key</b> (the old ones stop working) and removes your webhooks. To prove the number is yours, we will send a 6-digit code to your own WhatsApp chat &mdash; or, if WhatsApp is not connected, ask you to scan a QR code.</div>
@@ -539,7 +539,7 @@ footer a:hover{color:var(--text);}
       <button class="btn btn-ghost" onclick="showStep('s-key')">Cancel</button>
     </div>
 
-  
+    <!-- STEP: reset code -->
     <div class="step" id="s-code">
       <h2>Check your WhatsApp</h2>
       <p class="hint">We sent a 6-digit code to your own WhatsApp chat (&ldquo;Message yourself&rdquo;). Enter it to get a new Secret Key.</p>
@@ -550,7 +550,7 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
-   
+    <!-- STEP: server full -->
     <div class="step" id="s-full">
       <div class="sf-icon">&#128274;</div>
       <h2>Server at capacity</h2>
@@ -722,8 +722,9 @@ document.addEventListener('DOMContentLoaded', function() {
 </html>`;
 }
 
+
 function dashboardHTML(user) {
- 
+  
   return String.raw`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -869,7 +870,7 @@ textarea.fi{resize:vertical;min-height:80px;}
 <script>
 var KEY = '', CID = '', LOGS = [], HOOKS = [];
 
-// ── load data via API — no inline injection ──────────────────────────────────
+// ── load data via API — no inline injection ─
 async function boot() {
   try {
     var res  = await fetch('/api/me', { credentials: 'same-origin' });
@@ -895,6 +896,7 @@ function renderAll() {
   renderExamples();
 }
 
+// ── stats ───
 function renderStats() {
   var sent = LOGS.filter(function(l){ return l.status==='sent'; }).length;
   var recv = LOGS.filter(function(l){ return l.status==='received'; }).length;
@@ -904,6 +906,7 @@ function renderStats() {
 }
 function stat(n,l){ return '<div class="stat"><div class="stat-n">'+n+'</div><div class="stat-l">'+l+'</div></div>'; }
 
+// ── credentials ────────
 var keyVis = false;
 function renderCreds() {
   document.getElementById('creds').innerHTML =
@@ -931,6 +934,7 @@ function toggleKey(){
   if(el) el.textContent = keyVis ? KEY : mask(KEY);
 }
 
+// ── logs ────
 function renderLogs() {
   if (!LOGS.length) {
     document.getElementById('p-logs').innerHTML = '<div class="card"><div class="empty">No messages yet.</div></div>';
@@ -959,6 +963,7 @@ function logRow(l, isNew) {
     '<td>'+esc(l.body)+err+'</td><td>'+st+'</td></tr>';
 }
 
+// ── SSE live updates ───
 var sse = null;
 function startSSE() {
   if (sse) { sse.close(); sse = null; }
@@ -982,6 +987,7 @@ function startSSE() {
   es.onopen    = function(){ if(pill) pill.style.opacity='1'; };
 }
 
+// ── playground 
 function renderPlayground() {
   document.getElementById('p-playground').innerHTML =
     '<div class="card">' +
@@ -1011,6 +1017,7 @@ async function pgsend() {
   } catch(e){ el.className='pr er'; el.textContent='Error: '+e.message; }
 }
 
+// ── webhooks 
 function renderWebhooks() {
   var h = '<div class="card" style="margin-bottom:16px">' +
     '<div class="ct">Add Webhook</div>' +
@@ -1059,6 +1066,7 @@ async function toggleWH(id, active) {
   toast(active ? 'Resumed' : 'Paused');
 }
 
+// ── examples 
 function renderExamples() {
   var curl = 'curl -X POST "https://wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"message": "Hello!"}\'';
   var node = 'const res = await fetch(\n  \'https://wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000\',\n  { method:\'POST\', headers:{\'Content-Type\':\'application/json\'},\n    body: JSON.stringify({ message: \'Hello!\' }) }\n);\nconsole.log(await res.json());';
@@ -1079,6 +1087,7 @@ function renderExamples() {
     '</div>';
 }
 
+// ── UI helpers 
 function sw(name) {
   ['logs','playground','webhooks','examples'].forEach(function(n) {
     document.getElementById('t-'+n).classList.toggle('on', n===name);
@@ -1127,6 +1136,7 @@ boot();
 </body>
 </html>`;
 }
+
 
 function docsHTML() {
   return `<!DOCTYPE html>

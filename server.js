@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-// ── global safety net ─────────────────────────────────────────────────────────
+// ── global safety net 
 process.on('uncaughtException', (err) => {
   const msg = err?.message || '';
   if (err?.code === 'ENOENT' || msg.includes('Target closed') || msg.includes('TargetCloseError') ||
@@ -31,8 +31,7 @@ if (!MONGO_URI) {
   process.exit(1);
 }
 
-// Cookie-signing secret. Uses COOKIE_SECRET if set; otherwise one is generated ONCE and stored
-// in MongoDB, so logins survive restarts without any extra setup.
+
 async function getCookieSecret() {
   if (process.env.COOKIE_SECRET) return process.env.COOKIE_SECRET;
   const col = mongoose.connection.db.collection('wpsent_settings');

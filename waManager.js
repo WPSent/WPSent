@@ -1,3 +1,4 @@
+
 const { Client, RemoteAuth } = require('whatsapp-web.js');
 const { MongoStore }         = require('wwebjs-mongo');
 const mongoose               = require('mongoose');
@@ -7,68 +8,58 @@ const { execSync }           = require('child_process');
 const fs                     = require('fs');
 const path                   = require('path');
 
-const sessions     = new Map(); // phone → { client, status, qr }
-const qrCallbacks  = new Map(); // phone → [fn, ...]
-const logListeners = new Map(); // userId → [fn, ...]
-const reconnectTimers = new Map(); // phone → timeout (at most ONE pending reconnect per phone)
-const retryCount      = new Map(); // phone → consecutive failed init attempts
-const pairedAtMap     = new Map(); // phone → ms timestamp of the last *fresh QR pairing*
+const sessions     = new Map(); 
+const qrCallbacks  = new Map();
+const logListeners = new Map(); 
+const reconnectTimers = new Map(); 
+const retryCount      = new Map(); 
+const pairedAtMap     = new Map(); 
 
 const RECONNECT_MS = Number(process.env.WA_RECONNECT_MS) || 5000;
 const STAGGER_MS   = Number(process.env.WA_STAGGER_MS)   || 3000;
 const MAX_RETRIES  = 10;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-//  ENOENT guard (RemoteAuth zip race on first sync) 
+//  ENOENT guard (RemoteAuth zip race on first sync) ─
 const _origEmit = process.emit.bind(process);
 process.emit = function(event, error, ...args) {
   if (event === 'uncaughtException' && error?.code === 'ENOENT' && error?.path?.includes('RemoteAuth-')) {
-    console.warn(`[WP] Ignoring benign RemoteAuth zip error (first sync): ${error.path}`);
+    console.warn(`[WA] Ignoring benign RemoteAuth zip error (first sync): ${error.path}`);
     return true;
   }
   return _origEmit(event, error, ...args);
 };
 
-//  browser auto-detection
-
+//  browser detection 
 function isRealBrowser(p) {
   try {
     execSync(`test -f "${p}"`, { stdio: 'ignore' });
     const out = execSync(`"${p}" --version 2>&1 || true`, { timeout: 3000, encoding: 'utf8' });
     if (out.toLowerCase().includes('snap')) return false;
-    console.log(`[WP] Browser: ${p} (${out.trim()})`);
+    console.log(`[WA] Browser: ${p} (${out.trim()})`);
     return true;
   } catch (_) { return false; }
 }
 
 function findBrowser() {
   const candidates = [
-    // Nix (Railway nixpacks) — check first, most reliable on Railway
-    '/nix/var/nix/profiles/default/bin/chromium',
-    // Linux — Chrome (real binary, not a stub)
+    '/nix/var/nix/profiles/default/bin/chromium',  // Railway
     '/usr/bin/google-chrome-stable',
     '/usr/bin/google-chrome',
-    // Linux — Chromium real binary
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
-    // macOS — Chrome
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    // macOS — Chromium
     '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    // Windows — Chrome
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   ];
   for (const p of candidates) { if (isRealBrowser(p)) return p; }
-  console.log('[WP] Using Puppeteer bundled Chromium');
+  console.log('[WA] Using Puppeteer bundled Chromium');
   return null;
 }
 
 const BROWSER_PATH = findBrowser();
 
-//  helpers 
-
-/** Strip all non-digit characters — handles +, spaces, dashes */
+//  helpers ─
 function sanitizePhone(raw) {
   return String(raw).replace(/[^0-9]/g, '');
 }
@@ -133,8 +124,6 @@ function extractBody(msg) {
   return body || `[${msg.type || 'message'}]`;
 }
 
-// teardown / reconnect 
-
 async function teardown(phone) {
   const s = sessions.get(phone);
   sessions.delete(phone);
@@ -150,12 +139,12 @@ function scheduleReconnect(phone, delay = RECONNECT_MS) {
   if (s) s.reconnecting = true;
   reconnectTimers.set(phone, setTimeout(async () => {
     reconnectTimers.delete(phone);
-    await teardown(phone);          
+    await teardown(phone);         
     createSession(phone);
   }, delay));
 }
 
-//session factory
+//  session factory 
 function createSession(phone) {
   const existing = sessions.get(phone);
   if (existing) {
@@ -203,36 +192,36 @@ function createSession(phone) {
     session.status = 'ready';
     session.qr     = null;
     retryCount.delete(phone);
-    if (session.needsPair) {        // proof that someone holding the phone scanned the QR
+    if (session.needsPair) {      
       pairedAtMap.set(phone, Date.now());
       session.needsPair = false;
     }
-    console.log(`[WP] Ready: ${phone}`);
+    console.log(`[WA] Ready: ${phone}`);
     try { await WpUser.updateOne({ phone }, { lastSeen: new Date() }); }
-    catch (e) { console.error('[WP] lastSeen update failed:', e.message); }
+    catch (e) { console.error('[WA] lastSeen update failed:', e.message); }
   });
 
   client.on('remote_session_saved', () => {
-    console.log(`[WP] Session saved to MongoDB: ${phone}`);
+    console.log(`[WA] Session saved to MongoDB: ${phone}`);
   });
 
   client.on('auth_failure', (msg) => {
     if (session.destroyed) return;
     session.status = 'auth_failure';
-    console.error(`[WP] Auth failure for ${phone}:`, msg);
+    console.error(`[WA] Auth failure for ${phone}:`, msg);
   });
 
   client.on('disconnected', (reason) => {
     if (session.destroyed) return;
     session.status = 'disconnected';
-    console.log(`[WP] Disconnected ${phone}: ${reason} — reconnecting`);
+    console.log(`[WA] Disconnected ${phone}: ${reason} — reconnecting`);
     scheduleReconnect(phone);
   });
 
   client.on('error', (err) => {
     if (session.destroyed) return;
     const msg = err?.message || '';
-    console.error(`[WP] Error ${phone}:`, msg);
+    console.error(`[WA] Error ${phone}:`, msg);
     if (msg.includes('Target closed') || msg.includes('detached Frame') || msg.includes('Session closed') || msg.includes('Protocol error')) {
       session.status = 'disconnected';
       scheduleReconnect(phone);
@@ -241,7 +230,7 @@ function createSession(phone) {
 
   client.on('message', async (msg) => {
     try {
-     
+    
       if (msg.from === 'status@broadcast' || msg.isStatus) return;
       const user = await WpUser.findOne({ phone });
       if (!user) return;
@@ -251,7 +240,7 @@ function createSession(phone) {
       await pruneOldLogs(user._id);
       emitLog(user._id.toString(), log.toObject());
       await fireWebhooks(user._id, { event: 'message_received', from: msg.from.replace('@c.us',''), body, type, timestamp: (log.timestamp || new Date()).toISOString() });
-    } catch (e) { console.error('[WP] message handler error:', e.message); }
+    } catch (e) { console.error('[WA] message handler error:', e.message); }
   });
 
   client.on('message_reaction', async (reaction) => {
@@ -263,29 +252,29 @@ function createSession(phone) {
       await pruneOldLogs(user._id);
       emitLog(user._id.toString(), log.toObject());
       await fireWebhooks(user._id, { event: 'message_received', from: (reaction.senderId || 'unknown').replace('@c.us',''), body, type: 'reaction', timestamp: (log.timestamp || new Date()).toISOString() });
-    } catch (e) { console.error('[WP] reaction handler error:', e.message); }
+    } catch (e) { console.error('[WA] reaction handler error:', e.message); }
   });
 
   client.initialize().catch(err => {
     if (session.destroyed) return;
-    console.error(`[WP] Init error for ${phone}:`, err.message);
+    console.error(`[WA] Init error for ${phone}:`, err.message);
     session.status = 'error';
-   
+    
     const n = (retryCount.get(phone) || 0) + 1;
     retryCount.set(phone, n);
     if (n <= MAX_RETRIES) scheduleReconnect(phone, Math.min(RECONNECT_MS * 2 ** (n - 1), 5 * 60_000));
-    else console.error(`[WP] Giving up on ${phone} after ${MAX_RETRIES} failed attempts`);
+    else console.error(`[WA] Giving up on ${phone} after ${MAX_RETRIES} failed attempts`);
   });
 
   return session;
 }
 
-// ── destroy 
+//  destroy 
 
 async function wipeRemoteSession(phone) {
   const name = `RemoteAuth-${phone}`;
   try { await new MongoStore({ mongoose }).delete({ session: name }); }
-  catch (e) { console.warn(`[WP] Could not delete remote session ${name}:`, e.message); }
+  catch (e) { console.warn(`[WA] Could not delete remote session ${name}:`, e.message); }
   for (const p of [path.join('/tmp', name), `${name}.zip`, path.join('/tmp', `${name}.zip`)]) {
     try { fs.rmSync(p, { recursive: true, force: true }); } catch (_) {}
   }
@@ -299,10 +288,10 @@ async function destroySession(phone, { wipe = false } = {}) {
   retryCount.delete(phone);
   pairedAtMap.delete(phone);
   if (wipe) await wipeRemoteSession(phone);
-  console.log(`[WP] Session destroyed${wipe ? ' (remote session wiped)' : ''}: ${phone}`);
+  console.log(`[WA] Session destroyed${wipe ? ' (remote session wiped)' : ''}: ${phone}`);
 }
 
-// public API 
+//  public API ─
 function getSession(phone) { return sessions.get(phone) || null; }
 function getStatus(phone)  { return sessions.get(phone)?.status || 'not_started'; }
 
@@ -362,8 +351,8 @@ async function shutdown() {
     if (s.status === 'ready') {
       try {
         await Promise.race([s.auth.storeRemoteSession({ emit: false }), sleep(20_000)]);
-        console.log(`[WP] Saved session before shutdown: ${phone}`);
-      } catch (e) { console.warn(`[WP] Could not save session ${phone}:`, e.message); }
+        console.log(`[WA] Saved session before shutdown: ${phone}`);
+      } catch (e) { console.warn(`[WA] Could not save session ${phone}:`, e.message); }
     }
     try { await Promise.race([s.client.destroy(), sleep(5_000)]); } catch (_) {}
   }));
@@ -372,7 +361,7 @@ async function shutdown() {
 async function restoreAllSessions() {
   const users = await WpUser.find({}).select('phone').lean();
   users.forEach((u, i) => setTimeout(() => {
-    console.log(`[WP] Restoring session: ${u.phone}`);
+    console.log(`[WA] Restoring session: ${u.phone}`);
     createSession(u.phone);
   }, i * STAGGER_MS));
   return users.length;
