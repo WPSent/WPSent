@@ -2,7 +2,15 @@
 const { Client, RemoteAuth } = require('whatsapp-web.js');
 const { MongoStore }         = require('wwebjs-mongo');
 const mongoose               = require('mongoose');
-const { WpUser, MessageLog } = require('./models');
+const lazyModel = (name) => new Proxy({}, {
+  get: (_, key) => {
+    const model = require('./models')[name];
+    const value = model[key];
+    return typeof value === 'function' ? value.bind(model) : value;
+  }
+});
+const WpUser = lazyModel('WpUser');
+const MessageLog = lazyModel('MessageLog');
 const axios                  = require('axios');
 const { execSync }           = require('child_process');
 const fs                     = require('fs');

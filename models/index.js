@@ -3,17 +3,25 @@ const router   = express.Router();
 const crypto   = require('crypto');
 const qrcode   = require('qrcode');
 const { v4: uuidv4 } = require('uuid');
-const { WpUser, MessageLog } = require('../models');
+const lazyModel = (name) => new Proxy({}, {
+  get: (_, key) => {
+    const model = require('../models')[name];
+    const value = model[key];
+    return typeof value === 'function' ? value.bind(model) : value;
+  }
+});
+const WpUser = lazyModel('WpUser');
+const MessageLog = lazyModel('MessageLog');
 const wa = require('../waManager');
 
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS   = 15 * 60 * 1000;
 
 const CONFIG = {
-  GITHUB_URL:    'https://github.com/wpsent/wpsent',
-  INSTAGRAM_URL: 'https://instagram.com/adnanisagoodboy',
-  EMAIL:         'abdullahaladnan95@gmail.com',
-  SITE_URL:      'https://app.app.wpsent.xyz',
+  GITHUB_URL:    'https://github.com/YOUR_USERNAME/wpsent',
+  INSTAGRAM_URL: 'https://instagram.com/YOUR_INSTAGRAM',
+  EMAIL:         'your@email.com',
+  SITE_URL:      'https://wpsent.xyz',
   SINGLE_USER:   process.env.SINGLE_USER === 'true' || false,
 };
 
@@ -1168,9 +1176,9 @@ async function toggleWH(id, active) {
 }
 
 function renderExamples() {
-  var curl = 'curl -X POST "https://app.wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"message": "Hello!"}\'';
-  var node = 'const res = await fetch(\n  \'https://app.wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000\',\n  { method:\'POST\', headers:{\'Content-Type\':\'application/json\'},\n    body: JSON.stringify({ message: \'Hello!\' }) }\n);\nconsole.log(await res.json());';
-  var py   = 'import requests\nr = requests.post(\'https://app.wpsent.xyz/send\',\n    params={\'clientid\':\''+CID+'\',\'key\':\'YOUR_KEY\',\'to\':\'8801711000000\'},\n    json={\'message\': \'Hello!\'})\nprint(r.json())';
+  var curl = 'curl -X POST "https://wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"message": "Hello!"}\'';
+  var node = 'const res = await fetch(\n  \'https://wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000\',\n  { method:\'POST\', headers:{\'Content-Type\':\'application/json\'},\n    body: JSON.stringify({ message: \'Hello!\' }) }\n);\nconsole.log(await res.json());';
+  var py   = 'import requests\nr = requests.post(\'https://wpsent.xyz/send\',\n    params={\'clientid\':\''+CID+'\',\'key\':\'YOUR_KEY\',\'to\':\'8801711000000\'},\n    json={\'message\': \'Hello!\'})\nprint(r.json())';
 
   document.getElementById('p-examples').innerHTML =
     '<div class="card">' +
@@ -1367,7 +1375,7 @@ npm start              # visit http://localhost:3000</pre>
         <tr><td>message<span class="req">required</span></td><td>JSON body</td><td>Message text</td></tr>
       </tbody>
     </table>
-    <pre>curl -X POST "https://app.wpsent.xyz/send?clientid=YOUR_CID&key=YOUR_KEY&to=8801711000000" \\
+    <pre>curl -X POST "https://wpsent.xyz/send?clientid=YOUR_CID&key=YOUR_KEY&to=8801711000000" \\
   -H "Content-Type: application/json" \\
   -d '{"message": "Hello!"}'</pre>
     <p>Response:</p>
@@ -1375,7 +1383,7 @@ npm start              # visit http://localhost:3000</pre>
 
     <h2 id="logs">Message Logs</h2>
     <p><span class="mt get">GET</span><code>/logs</code> &mdash; last 100 messages, oldest auto-deleted.</p>
-    <pre>curl "https://app.wpsent.xyz/logs?clientid=YOUR_CID&key=YOUR_KEY"</pre>
+    <pre>curl "https://wpsent.xyz/logs?clientid=YOUR_CID&key=YOUR_KEY"</pre>
 
     <h2 id="status">Connection Status</h2>
     <p><span class="mt get">GET</span><code>/status</code></p>
@@ -1404,14 +1412,14 @@ x-api-key: YOUR_KEY
     <h2 id="examples">Code Examples</h2>
     <h3>Node.js</h3>
     <pre>const res = await fetch(
-  'https://app.wpsent.xyz/send?clientid=YOUR_CID&key=YOUR_KEY&to=8801711000000',
+  'https://wpsent.xyz/send?clientid=YOUR_CID&key=YOUR_KEY&to=8801711000000',
   { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ message: 'Hello!' }) }
 );
 console.log(await res.json());</pre>
     <h3>Python</h3>
     <pre>import requests
-r = requests.post('https://app.wpsent.xyz/send',
+r = requests.post('https://wpsent.xyz/send',
     params={'clientid':'YOUR_CID','key':'YOUR_KEY','to':'8801711000000'},
     json={'message': 'Hello!'})
 print(r.json())</pre>
