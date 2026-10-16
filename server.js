@@ -19,7 +19,7 @@ const express      = require('express');
 const mongoose     = require('mongoose');
 const cookieParser = require('cookie-parser');
 const wa           = require('./waManager');
-const routes       = require('./routes');
+const routes       = require('./routes/index.js');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;

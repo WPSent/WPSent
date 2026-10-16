@@ -1,24 +1,41 @@
 const express  = require('express');
 const router   = express.Router();
 const crypto   = require('crypto');
+const mongoose = require('mongoose');
 const qrcode   = require('qrcode');
 const { v4: uuidv4 } = require('uuid');
-const { WpUser, MessageLog } = require('../models');
+const loadModels = () => {
+  for (const p of ['../models/models.js', '../models/index.js', '../models.js']) {
+    try { return require(p); }
+    catch (e) { if (e.code !== 'MODULE_NOT_FOUND' || !e.message.includes(p.slice(3))) throw e; }
+  }
+  throw new Error('Models file not found. Put it at ../models/models.js');
+};
+const lazyModel = (name) => new Proxy({}, {
+  get: (_, key) => {
+    const exported = loadModels();
+    const model = (exported && exported[name]) || (exported && exported.default && exported.default[name]) || (mongoose.models || {})[name];
+    if (!model) {
+      throw new Error(`Model "${name}" not found. models exports: [${Object.keys(exported || {}).join(', ')}]`);
+    }
+    const value = model[key];
+    return typeof value === 'function' ? value.bind(model) : value;
+  }
+});
+const WpUser = lazyModel('WpUser');
+const MessageLog = lazyModel('MessageLog');
 const wa = require('../waManager');
 
 const MAX_ATTEMPTS = 5;
-const LOCKOUT_MS   = 15 * 60 * 1000; // 15 minutes
+const LOCKOUT_MS   = 15 * 60 * 1000;
 
- 
 const CONFIG = {
-  GITHUB_URL:    'https://github.com/wpsent/wpsent',
-  INSTAGRAM_URL: 'https://instagram.com/adnanisagoodboy',
+  GITHUB_URL:    'https://github.com/YOUR_USERNAME/wpsent',
+  INSTAGRAM_URL: 'https://instagram.com/YOUR_INSTAGRAM',
   EMAIL:         'your@email.com',
   SITE_URL:      'https://wpsent.xyz',
-  // Single-user
   SINGLE_USER:   process.env.SINGLE_USER === 'true' || false,
 };
-
 
 function genClientId() { return 'cid_' + crypto.randomBytes(6).toString('hex'); }
 async function uniqueClientId() {
@@ -29,16 +46,13 @@ async function uniqueClientId() {
   throw new Error('Could not generate a unique client ID');
 }
 
-
 const str = (v) => (typeof v === 'string' ? v : (Array.isArray(v) ? String(v[0] ?? '') : '')).trim();
 
-// Constant-time comparison for secrets
 function safeEq(a, b) {
   const x = Buffer.from(String(a ?? '')), y = Buffer.from(String(b ?? ''));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
-// Express 4 doesn't catch rejected promises from async handlers (request just hangs).
 const ah = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch((e) => {
     console.error('[route error]', req.method, req.path, e);
@@ -46,7 +60,6 @@ const ah = (fn) => (req, res, next) =>
     res.status(500).json({ error: 'Internal server error' });
   });
 
-// ── sessions / pairing 
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const PAIR_TTL   = 10 * 60 * 1000;
 const cookieOpts = (req, maxAge) => ({ httpOnly: true, sameSite: 'lax', signed: true, secure: !!req.secure, maxAge });
@@ -56,7 +69,7 @@ function setSession(req, res, user) {
   res.cookie('wpsent_phone', `${user.phone}:${keyTag(user)}`, cookieOpts(req, SESSION_MS));
 }
 async function userFromCookie(req) {
-  const raw = req.signedCookies && req.signedCookies.wpsent_phone;   // false/undefined if forged
+  const raw = req.signedCookies && req.signedCookies.wpsent_phone;
   if (typeof raw !== 'string') return null;
   const [phone, tag] = raw.split(':');
   if (!phone || !tag) return null;
@@ -64,8 +77,7 @@ async function userFromCookie(req) {
   return user && safeEq(keyTag(user), tag) ? user : null;
 }
 
-
-const pending = new Map();   // phone → { nonce, rotate, createdAt }
+const pending = new Map();
 function startPairing(req, res, phone, rotate) {
   for (const [p, v] of pending) if (Date.now() - v.createdAt > PAIR_TTL) pending.delete(p);
   const nonce = crypto.randomBytes(16).toString('hex');
@@ -85,15 +97,13 @@ async function rotateCredentials(phone) {
   return WpUser.findOneAndUpdate({ phone }, {
     clientId: await uniqueClientId(), apiKey: uuidv4(),
     loginAttempts: 0, lockedUntil: null,
-    webhooks: []            
+    webhooks: []
   }, { new: true });
 }
 
+const resetCodes   = new Map();
+const codeCooldown = new Map();
 
-const resetCodes   = new Map();   // phone → { code, exp, attempts }
-const codeCooldown = new Map();   // phone → last request ms
-
-// ── middleware: REST API ─
 const requireKey = ah(async (req, res, next) => {
   const clientId = str(req.query.clientid || req.headers['x-client-id']);
   const key      = str(req.query.key      || req.headers['x-api-key']);
@@ -106,7 +116,6 @@ const requireKey = ah(async (req, res, next) => {
   next();
 });
 
-// ── middleware: dashboard (signed cookie only) 
 const requireDashboard = ah(async (req, res, next) => {
   const user = await userFromCookie(req);
   if (!user) {
@@ -119,12 +128,9 @@ const requireDashboard = ah(async (req, res, next) => {
   next();
 });
 
-
 router.get('/', (req, res) => res.send(landingHTML()));
 
-
 router.get('/docs', (req, res) => res.send(docsHTML()));
-
 
 router.post('/auth/start', ah(async (req, res) => {
   const phone = wa.sanitizePhone(str(req.body?.phone));
@@ -136,7 +142,6 @@ router.post('/auth/start', ah(async (req, res) => {
     return res.json({ ok: true, phone, existing: true });
   }
 
-  // Single-user mode: block new registrations if any user exists
   if (CONFIG.SINGLE_USER) {
     const count = await WpUser.countDocuments();
     if (count >= 1) {
@@ -150,11 +155,9 @@ router.post('/auth/start', ah(async (req, res) => {
     }
   }
 
-  // New user
   try {
     await WpUser.create({ phone, clientId: await uniqueClientId(), apiKey: uuidv4() });
   } catch (e) {
-    // two requests for the same new number at once -> duplicate key; treat as existing
     if (e && e.code === 11000) return res.json({ ok: true, phone, existing: true });
     throw e;
   }
@@ -162,7 +165,6 @@ router.post('/auth/start', ah(async (req, res) => {
   startPairing(req, res, phone, false);
   res.json({ ok: true, phone, existing: false });
 }));
-
 
 router.post('/auth/login', ah(async (req, res) => {
   const phone = wa.sanitizePhone(str(req.body?.phone));
@@ -172,7 +174,6 @@ router.post('/auth/login', ah(async (req, res) => {
   const user = await WpUser.findOne({ phone });
   if (!user) return res.status(403).json({ error: 'User not found' });
 
-  // Lockout check
   if (user.lockedUntil && user.lockedUntil > new Date()) {
     const remaining = Math.ceil((user.lockedUntil - Date.now()) / 60000);
     return res.status(429).json({ error: `Locked. Try again in ${remaining} minute${remaining !== 1 ? 's' : ''}.`, locked: true, remaining });
@@ -194,7 +195,6 @@ router.post('/auth/login', ah(async (req, res) => {
   setSession(req, res, user);
   res.json({ ok: true, phone });
 }));
-
 
 router.post('/auth/reset', ah(async (req, res) => {
   const phone = wa.sanitizePhone(str(req.body?.phone));
@@ -218,8 +218,7 @@ router.post('/auth/reset', ah(async (req, res) => {
     return res.json({ ok: true, mode: 'code' });
   }
 
-  // Not connected:
-  if (st === 'auth_failure') await wa.destroySession(phone, { wipe: true });   // saved login is invalid
+  if (st === 'auth_failure') await wa.destroySession(phone, { wipe: true });
   else if (st === 'error')   await wa.destroySession(phone);
   if (wa.getStatus(phone) === 'not_started') wa.createSession(phone);
   startPairing(req, res, phone, true);
@@ -241,10 +240,9 @@ router.post('/auth/reset/confirm', ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
-
 router.get('/auth/claim', ah(async (req, res) => {
   const p = getPairing(req);
-  if (!p || wa.getPairedAt(p.phone) < p.createdAt) return res.redirect('/');   // no fresh scan → no login
+  if (!p || wa.getPairedAt(p.phone) < p.createdAt) return res.redirect('/');
   pending.delete(p.phone);
   res.clearCookie('wpsent_pair');
   const user = p.rotate ? await rotateCredentials(p.phone) : await WpUser.findOne({ phone: p.phone });
@@ -252,7 +250,6 @@ router.get('/auth/claim', ah(async (req, res) => {
   setSession(req, res, user);
   res.redirect('/dashboard');
 }));
-
 
 router.get('/auth/qr-stream', (req, res) => {
   const p = getPairing(req);
@@ -274,29 +271,25 @@ router.get('/auth/qr-stream', (req, res) => {
 
   const check = () => {
     if (wa.getPairedAt(phone) >= p.createdAt) { send('ready', {}); cleanup(); res.end(); return true; }
-    // connected WITHOUT a fresh scan (auto-restored session) → can't be used to prove ownership
     if (wa.getStatus(phone) === 'ready')       { send('blocked', {}); cleanup(); res.end(); return true; }
     return false;
   };
 
   if (check()) return;
-  wa.onQR(phone, sendQR);            // onQR replays the current QR immediately if there is one
+  wa.onQR(phone, sendQR);
   timer = setInterval(check, 2000);
   req.on('close', cleanup);
 });
-
 
 router.get('/dashboard', requireDashboard, (req, res) => {
   res.send(dashboardHTML(req.wpUser));
 });
 
-
 router.get('/logout', (req, res) => { res.clearCookie('wpsent_phone'); res.clearCookie('wpsent_pair'); res.redirect('/'); });
-
 
 router.get('/api/me', requireDashboard, ah(async (req, res) => {
   const logs = await MessageLog.find({ userId: req.wpUser._id }).sort({ timestamp: -1 }).limit(100).lean();
-  res.set('Cache-Control', 'no-store');   // never cache credentials
+  res.set('Cache-Control', 'no-store');
   res.json({
     apiKey:   req.wpUser.apiKey,
     clientId: req.wpUser.clientId,
@@ -307,6 +300,45 @@ router.get('/api/me', requireDashboard, ah(async (req, res) => {
   });
 }));
 
+router.get('/api/status', requireDashboard, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ status: wa.getStatus(req.wpPhone) });
+});
+
+const rescanCooldown = new Map();
+router.post('/api/rescan', requireDashboard, ah(async (req, res) => {
+  const phone = req.wpPhone;
+  if (Date.now() - (rescanCooldown.get(phone) || 0) < 10_000)
+    return res.status(429).json({ error: 'Please wait a few seconds before trying again.' });
+  rescanCooldown.set(phone, Date.now());
+  await wa.rescanSession(phone);
+  res.json({ ok: true });
+}));
+
+router.get('/api/qr-stream', requireDashboard, (req, res) => {
+  const phone = req.wpPhone;
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
+  res.flushHeaders();
+
+  const send = (event, data) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch(_){} };
+  const sendQR = async (qr) => {
+    try { send('qr', { dataUrl: await qrcode.toDataURL(qr, { width: 300 }) }); }
+    catch (e) { console.error('[qr] render failed', e.message); }
+  };
+  let timer = null;
+  const cleanup = () => { clearInterval(timer); wa.offQR(phone, sendQR); };
+  const check = () => {
+    if (wa.getStatus(phone) === 'ready') { send('ready', {}); cleanup(); res.end(); return true; }
+    return false;
+  };
+
+  if (check()) return;
+  wa.onQR(phone, sendQR);
+  timer = setInterval(check, 2000);
+  req.on('close', cleanup);
+});
 
 router.get('/api/logs-stream', requireDashboard, (req, res) => {
   res.setHeader('Content-Type',  'text/event-stream');
@@ -320,7 +352,6 @@ router.get('/api/logs-stream', requireDashboard, (req, res) => {
   const hb = setInterval(() => { try { res.write(': heartbeat\n\n'); } catch(_){} }, 10000);
   req.on('close', () => { clearInterval(hb); wa.offLog(uid, send); });
 });
-
 
 router.post('/send', requireKey, ah(async (req, res) => {
   const rawTo   = str(req.query.to || req.body?.to);
@@ -341,17 +372,14 @@ router.post('/send', requireKey, ah(async (req, res) => {
   res.json({ ok: true, logId: log._id });
 }));
 
-
 router.get('/logs', requireKey, ah(async (req, res) => {
   const logs = await MessageLog.find({ userId: req.wpUser._id }).sort({ timestamp: -1 }).limit(100);
   res.json(logs);
 }));
 
-
 router.get('/status', requireKey, (req, res) => {
   res.json({ phone: req.wpUser.phone, status: wa.getStatus(req.wpUser.phone) });
 });
-
 
 router.post('/webhooks', requireKey, ah(async (req, res) => {
   const url    = str(req.body?.url);
@@ -397,7 +425,7 @@ function landingHTML() {
   --green:#25d366;--text:#e8e8e8;--muted:#666;--danger:#e74c3c;--warn:#f39c12;--blue:#3498db;
   --r:12px;--rs:8px;}
 body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;}
-/* topbar */
+
 .nav{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;
   border-bottom:1px solid var(--border);background:rgba(13,13,13,.95);backdrop-filter:blur(10px);
   position:sticky;top:0;z-index:100;}
@@ -407,7 +435,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .nav-link{font-size:12px;color:var(--muted);text-decoration:none;padding:6px 12px;border-radius:20px;border:1px solid transparent;transition:all .15s;}
 .nav-link:hover{color:var(--text);border-color:var(--border);}
 .nav-link.gh{background:var(--surf2);border-color:var(--border);color:var(--text);display:flex;align-items:center;gap:6px;}
-/* hero */
+
 .hero{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;padding:60px 24px 40px;}
 .hero-icon{width:72px;height:72px;background:var(--green);border-radius:20px;display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:20px;box-shadow:0 0 40px rgba(37,211,102,.25);}
 .hero h1{font-size:36px;font-weight:700;margin-bottom:10px;letter-spacing:-.5px;}
@@ -415,7 +443,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .hero p{font-size:15px;color:var(--muted);text-align:center;max-width:420px;line-height:1.7;margin-bottom:32px;}
 .features{display:flex;gap:12px;margin-bottom:40px;flex-wrap:wrap;justify-content:center;}
 .feat{background:var(--surf);border:1px solid var(--border);border-radius:var(--rs);padding:8px 14px;font-size:12px;color:var(--muted);}
-/* card */
+
 .card{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:28px;width:100%;max-width:420px;}
 .step{display:none;}.step.active{display:block;}
 h2{font-size:17px;font-weight:600;margin-bottom:6px;}
@@ -438,22 +466,22 @@ hr.div{border:none;border-top:1px solid var(--border);margin:16px 0;}
 .back{font-size:12px;color:var(--muted);cursor:pointer;text-align:center;margin-top:14px;
   display:block;text-decoration:underline;}
 .back:hover{color:var(--text);}
-/* QR */
+
 .qr-wrap{background:#fff;border-radius:var(--r);padding:14px;display:none;margin:14px auto;width:fit-content;}
 .qr-wrap img{display:block;width:220px;height:220px;}
 .status-row{display:flex;align-items:center;gap:8px;justify-content:center;font-size:13px;color:var(--muted);margin:10px 0;}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.2s ease-in-out infinite;}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-/* server full */
+
 .sf-icon{font-size:48px;text-align:center;margin-bottom:12px;}
 .sf-links{display:flex;flex-direction:column;gap:8px;margin-top:16px;}
 .sf-link{display:flex;align-items:center;gap:10px;background:var(--surf2);border:1px solid var(--border);
   border-radius:var(--rs);padding:12px 14px;text-decoration:none;color:var(--text);font-size:13px;transition:border-color .15s;}
 .sf-link:hover{border-color:var(--green);}
 .sf-link-icon{font-size:18px;flex-shrink:0;}
-/* lock countdown */
+
 .lock-num{font-size:24px;font-weight:700;color:var(--warn);text-align:center;margin:12px 0;}
-/* footer */
+
 footer{text-align:center;padding:24px;font-size:11px;color:var(--muted);}
 footer a{color:var(--muted);text-decoration:none;margin:0 6px;}
 footer a:hover{color:var(--text);}
@@ -486,7 +514,6 @@ footer a:hover{color:var(--text);}
 
   <div class="card">
 
-    <!-- STEP: phone -->
     <div class="step active" id="s-phone">
       <h2>Get started</h2>
       <p class="hint">Enter your WhatsApp number to sign in or create an account.</p>
@@ -497,7 +524,6 @@ footer a:hover{color:var(--text);}
       <div class="err" id="err-phone"></div>
     </div>
 
-    <!-- STEP: secret key login -->
     <div class="step" id="s-key">
       <h2>Enter your Secret Key</h2>
       <p class="hint">Your account exists. Paste your Secret Key to sign in.</p>
@@ -512,7 +538,6 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
-    <!-- STEP: locked -->
     <div class="step" id="s-locked">
       <h2>Account locked</h2>
       <p class="hint">Too many failed attempts.</p>
@@ -521,7 +546,6 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
-    <!-- STEP: new user QR -->
     <div class="step" id="s-qr">
       <h2>Scan QR Code</h2>
       <p class="hint">Open WhatsApp &rarr; Linked Devices &rarr; Link a Device &rarr; scan.</p>
@@ -531,7 +555,6 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
-    <!-- STEP: reset confirm -->
     <div class="step" id="s-reset">
       <h2>Reset account?</h2>
       <div class="warn-box">This creates a <b>new Client ID and Secret Key</b> (the old ones stop working) and removes your webhooks. To prove the number is yours, we will send a 6-digit code to your own WhatsApp chat &mdash; or, if WhatsApp is not connected, ask you to scan a QR code.</div>
@@ -539,7 +562,6 @@ footer a:hover{color:var(--text);}
       <button class="btn btn-ghost" onclick="showStep('s-key')">Cancel</button>
     </div>
 
-    <!-- STEP: reset code -->
     <div class="step" id="s-code">
       <h2>Check your WhatsApp</h2>
       <p class="hint">We sent a 6-digit code to your own WhatsApp chat (&ldquo;Message yourself&rdquo;). Enter it to get a new Secret Key.</p>
@@ -550,7 +572,6 @@ footer a:hover{color:var(--text);}
       <span class="back" onclick="goBack()">&larr; Different number</span>
     </div>
 
-    <!-- STEP: server full -->
     <div class="step" id="s-full">
       <div class="sf-icon">&#128274;</div>
       <h2>Server at capacity</h2>
@@ -722,9 +743,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </html>`;
 }
 
-
 function dashboardHTML(user) {
-  
   return String.raw`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -740,7 +759,7 @@ function dashboardHTML(user) {
   --green:#25d366;--gdim:#1a9e4a;--text:#e8e8e8;--muted:#666;
   --danger:#e74c3c;--warn:#f39c12;--blue:#3498db;--purple:#9b59b6;--r:12px;--rs:8px;}
 body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;}
-/* topbar */
+
 .bar{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;
   border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100;
   background:rgba(13,13,13,.95);backdrop-filter:blur(10px);}
@@ -757,15 +776,29 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .out-btn{font-size:12px;color:var(--muted);background:none;border:1px solid var(--border);
   padding:5px 11px;border-radius:20px;cursor:pointer;text-decoration:none;}
 .out-btn:hover{color:var(--text);border-color:var(--muted);}
-/* layout */
+.dot.off{background:var(--danger);}
+.banner{display:none;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  background:#2a1613;border:1px solid #5a2a24;color:#f0b4ad;border-radius:var(--r);padding:12px 16px;margin-bottom:16px;font-size:13px;}
+.banner.on{display:flex;}
+.banner button{background:var(--danger);color:#fff;border:none;border-radius:var(--rs);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;z-index:300;padding:20px;}
+.modal-bg.on{display:flex;}
+.modal{background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:24px;max-width:380px;width:100%;text-align:center;}
+.modal h3{font-size:16px;margin-bottom:8px;}
+.modal p{font-size:13px;color:var(--muted);line-height:1.5;margin-bottom:14px;}
+.modal img{width:260px;height:260px;max-width:100%;background:#fff;border-radius:10px;padding:8px;display:none;margin:0 auto 12px;}
+.modal .mrow{display:flex;gap:8px;justify-content:center;}
+.modal .mbtn{border:1px solid var(--border);background:var(--surf2);color:var(--text);border-radius:var(--rs);padding:9px 16px;font-size:13px;cursor:pointer;}
+.modal .mbtn.go{background:var(--green);color:#0d0d0d;border-color:var(--green);font-weight:600;}
+
 main{max-width:1140px;margin:0 auto;padding:24px;}
-/* stats */
+
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;}
 @media(max-width:680px){.stats{grid-template-columns:repeat(2,1fr);}}
 .stat{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:16px;text-align:center;}
 .stat-n{font-size:28px;font-weight:700;color:var(--green);}
 .stat-l{font-size:11px;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:.5px;}
-/* creds */
+
 .cred-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:24px;}
 @media(max-width:680px){.cred-grid{grid-template-columns:1fr;}}
 .card{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:20px;}
@@ -777,13 +810,13 @@ main{max-width:1140px;margin:0 auto;padding:24px;}
   color:var(--green);word-break:break-all;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;transition:border-color .15s;}
 .cv:hover{border-color:var(--green);}
 .cc{font-size:10px;color:var(--muted);white-space:nowrap;flex-shrink:0;}
-/* tabs */
+
 .tabs{display:flex;gap:2px;margin-bottom:18px;border-bottom:1px solid var(--border);}
 .tab{padding:9px 16px;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;
   color:var(--muted);transition:all .15s;white-space:nowrap;}
 .tab.on{color:var(--text);border-bottom-color:var(--green);}
 .panel{display:none;}.panel.on{display:block;}
-/* table */
+
 .twrap{overflow-x:auto;}
 table{width:100%;border-collapse:collapse;min-width:580px;}
 th{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:600;
@@ -800,7 +833,7 @@ tr.nr{animation:fi .4s ease;}
 .bo{background:#2a2010;color:var(--warn);}
 .mono{font-family:'JetBrains Mono',monospace;font-size:12px;}
 .empty{text-align:center;padding:40px 20px;color:var(--muted);}
-/* forms */
+
 label{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;display:block;margin-bottom:6px;}
 input.fi,select.fi,textarea.fi{width:100%;background:var(--surf2);border:1px solid var(--border);
   border-radius:var(--rs);padding:10px 12px;color:var(--text);font-size:13px;font-family:inherit;outline:none;margin-bottom:12px;}
@@ -812,13 +845,13 @@ textarea.fi{resize:vertical;min-height:80px;}
 .btn-d{background:#3a1a1a;color:var(--danger);border:1px solid #5a2a2a;}
 .btn-s{padding:5px 11px;font-size:12px;}
 .row{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;}
-/* playground */
+
 .pr{background:var(--surf2);border:1px solid var(--border);border-radius:var(--rs);padding:12px;
   min-height:60px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;
   white-space:pre-wrap;word-break:break-all;color:var(--muted);margin-top:12px;}
 .pr.ok{color:var(--green);border-color:var(--gdim);}
 .pr.er{color:var(--danger);border-color:#5a2a2a;}
-/* code */
+
 .cb{background:var(--surf2);border:1px solid var(--border);border-radius:var(--rs);padding:14px;
   font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;white-space:pre-wrap;
   word-break:break-all;color:#aaa;margin-bottom:14px;position:relative;}
@@ -829,16 +862,16 @@ textarea.fi{resize:vertical;min-height:80px;}
 .ltb{padding:5px 12px;font-size:12px;font-weight:500;cursor:pointer;border-radius:6px 6px 0 0;
   background:var(--surf2);color:var(--muted);border:1px solid var(--border);border-bottom:none;}
 .ltb.on{background:var(--surf);color:var(--text);}
-/* webhook */
+
 .wi{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--surf2);}
 .wi:last-child{border-bottom:none;}
 .wu{font-family:'JetBrains Mono',monospace;font-size:12px;word-break:break-all;}
 .wm{font-size:11px;color:var(--muted);margin-top:2px;}
-/* toast */
+
 .toast{position:fixed;bottom:20px;right:20px;background:#1a3a26;color:var(--green);border:1px solid var(--gdim);
   padding:10px 16px;border-radius:var(--rs);font-size:13px;font-weight:500;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9999;}
 .toast.on{opacity:1;}
-/* loading */
+
 .loading{text-align:center;padding:40px;color:var(--muted);font-size:13px;}
 </style>
 </head>
@@ -847,11 +880,16 @@ textarea.fi{resize:vertical;min-height:80px;}
   <div class="bar-logo"><div class="bar-icon">💬</div>WPSent</div>
   <div class="bar-right">
     <div class="live-pill" id="live-pill"><div class="live-dot"></div>LIVE</div>
-    <div class="pill"><div class="dot"></div><span id="bar-phone">${String(user.phone).replace(/[^0-9+]/g,'')}</span></div>
+    <div class="pill"><div class="dot" id="wa-dot"></div><span id="bar-phone">${String(user.phone).replace(/[^0-9+]/g,'')}</span></div>
+    <button class="out-btn" id="rescan-btn" onclick="openRescan()">Rescan</button>
     <a class="out-btn" href="/logout">Logout</a>
   </div>
 </div>
 <main>
+  <div class="banner" id="wa-banner">
+    <span id="wa-banner-text">WhatsApp session lost.</span>
+    <button onclick="openRescan()">Rescan QR</button>
+  </div>
   <div class="stats" id="stats"><div class="loading">Loading...</div></div>
   <div class="cred-grid" id="creds"><div class="loading">Loading...</div></div>
   <div class="tabs">
@@ -867,10 +905,21 @@ textarea.fi{resize:vertical;min-height:80px;}
 </main>
 <div class="toast" id="toast"></div>
 
-<script>
-var KEY = '', CID = '', LOGS = [], HOOKS = [];
+<div class="modal-bg" id="rescan-modal">
+  <div class="modal">
+    <h3>Rescan WhatsApp</h3>
+    <p id="rescan-msg">This clears the saved WhatsApp session and links your number again. Your Client ID and Secret Key stay the same.</p>
+    <img id="rescan-qr" alt="QR code"/>
+    <div class="mrow">
+      <button class="mbtn go" id="rescan-go" onclick="startRescan()">Start rescan</button>
+      <button class="mbtn" onclick="closeRescan()">Close</button>
+    </div>
+  </div>
+</div>
 
-// ── load data via API — no inline injection ─
+<script>
+var KEY = '', CID = '', LOGS = [], HOOKS = [], WA = 'unknown', rqES = null;
+
 async function boot() {
   try {
     var res  = await fetch('/api/me', { credentials: 'same-origin' });
@@ -880,11 +929,89 @@ async function boot() {
     CID   = data.clientId;
     LOGS  = data.logs  || [];
     HOOKS = data.webhooks || [];
+    WA    = data.status || 'unknown';
+    renderWA();
     renderAll();
     startSSE();
+    setInterval(pollStatus, 8000);
   } catch(e) {
     document.getElementById('stats').innerHTML = '<div class="loading">Failed to load. Refresh the page.</div>';
   }
+}
+
+var WA_TEXT = {
+  qr_ready: 'WhatsApp is not linked. Scan the QR code to reconnect.',
+  disconnected: 'WhatsApp disconnected. It will try to reconnect; if it stays like this, rescan.',
+  auth_failure: 'WhatsApp session lost. Rescan to link your number again.',
+  error: 'WhatsApp session failed to start. Rescan to fix it.',
+  not_started: 'WhatsApp session is not running. Rescan to start it.',
+  initializing: 'WhatsApp is starting...'
+};
+
+function renderWA() {
+  var ok = WA === 'ready';
+  var dot = document.getElementById('wa-dot');
+  if (dot) dot.className = ok ? 'dot' : 'dot off';
+  var banner = document.getElementById('wa-banner');
+  if (banner) {
+    banner.className = ok ? 'banner' : 'banner on';
+    document.getElementById('wa-banner-text').textContent = WA_TEXT[WA] || 'WhatsApp is not connected.';
+  }
+}
+
+async function pollStatus() {
+  try {
+    var r = await fetch('/api/status', { credentials: 'same-origin' });
+    if (r.status === 401) { window.location.href = '/'; return; }
+    var d = await r.json();
+    if (d.status !== WA) { WA = d.status; renderWA(); }
+  } catch(e) {}
+}
+
+function openRescan() {
+  document.getElementById('rescan-msg').textContent = 'This clears the saved WhatsApp session and links your number again. Your Client ID and Secret Key stay the same.';
+  document.getElementById('rescan-qr').style.display = 'none';
+  var go = document.getElementById('rescan-go');
+  go.style.display = ''; go.disabled = false; go.textContent = 'Start rescan';
+  document.getElementById('rescan-modal').className = 'modal-bg on';
+}
+
+function closeRescan() {
+  if (rqES) { rqES.close(); rqES = null; }
+  document.getElementById('rescan-modal').className = 'modal-bg';
+  pollStatus();
+}
+
+async function startRescan() {
+  var go  = document.getElementById('rescan-go');
+  var msg = document.getElementById('rescan-msg');
+  go.disabled = true; go.textContent = 'Starting...';
+  msg.textContent = 'Clearing the old session and starting WhatsApp. The QR code appears in a few seconds...';
+  try {
+    var r = await fetch('/api/rescan', { method: 'POST', credentials: 'same-origin' });
+    if (r.status === 401) { window.location.href = '/'; return; }
+    if (!r.ok) { var e = await r.json(); msg.textContent = e.error || 'Rescan failed.'; go.disabled = false; go.textContent = 'Try again'; return; }
+  } catch(e) { msg.textContent = 'Network error.'; go.disabled = false; go.textContent = 'Try again'; return; }
+  go.style.display = 'none';
+  WA = 'initializing'; renderWA();
+  if (rqES) rqES.close();
+  var es = rqES = new EventSource('/api/qr-stream');
+  es.addEventListener('qr', function(ev) {
+    var img = document.getElementById('rescan-qr');
+    img.src = JSON.parse(ev.data).dataUrl;
+    img.style.display = 'block';
+    msg.textContent = 'Open WhatsApp > Linked devices > Link a device, then scan this code.';
+    WA = 'qr_ready'; renderWA();
+  });
+  es.addEventListener('ready', function() {
+    es.close(); rqES = null;
+    WA = 'ready'; renderWA();
+    toast('&#10003; WhatsApp connected');
+    document.getElementById('rescan-modal').className = 'modal-bg';
+  });
+  es.onerror = function() {
+    if (es.readyState === 2) { msg.textContent = 'Connection lost. Close this and try again.'; }
+  };
 }
 
 function renderAll() {
@@ -896,7 +1023,6 @@ function renderAll() {
   renderExamples();
 }
 
-// ── stats ───
 function renderStats() {
   var sent = LOGS.filter(function(l){ return l.status==='sent'; }).length;
   var recv = LOGS.filter(function(l){ return l.status==='received'; }).length;
@@ -906,7 +1032,6 @@ function renderStats() {
 }
 function stat(n,l){ return '<div class="stat"><div class="stat-n">'+n+'</div><div class="stat-l">'+l+'</div></div>'; }
 
-// ── credentials ────────
 var keyVis = false;
 function renderCreds() {
   document.getElementById('creds').innerHTML =
@@ -934,7 +1059,6 @@ function toggleKey(){
   if(el) el.textContent = keyVis ? KEY : mask(KEY);
 }
 
-// ── logs ────
 function renderLogs() {
   if (!LOGS.length) {
     document.getElementById('p-logs').innerHTML = '<div class="card"><div class="empty">No messages yet.</div></div>';
@@ -963,7 +1087,6 @@ function logRow(l, isNew) {
     '<td>'+esc(l.body)+err+'</td><td>'+st+'</td></tr>';
 }
 
-// ── SSE live updates ───
 var sse = null;
 function startSSE() {
   if (sse) { sse.close(); sse = null; }
@@ -987,7 +1110,6 @@ function startSSE() {
   es.onopen    = function(){ if(pill) pill.style.opacity='1'; };
 }
 
-// ── playground 
 function renderPlayground() {
   document.getElementById('p-playground').innerHTML =
     '<div class="card">' +
@@ -1017,7 +1139,6 @@ async function pgsend() {
   } catch(e){ el.className='pr er'; el.textContent='Error: '+e.message; }
 }
 
-// ── webhooks 
 function renderWebhooks() {
   var h = '<div class="card" style="margin-bottom:16px">' +
     '<div class="ct">Add Webhook</div>' +
@@ -1066,7 +1187,6 @@ async function toggleWH(id, active) {
   toast(active ? 'Resumed' : 'Paused');
 }
 
-// ── examples 
 function renderExamples() {
   var curl = 'curl -X POST "https://wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"message": "Hello!"}\'';
   var node = 'const res = await fetch(\n  \'https://wpsent.xyz/send?clientid='+CID+'&key=YOUR_KEY&to=8801711000000\',\n  { method:\'POST\', headers:{\'Content-Type\':\'application/json\'},\n    body: JSON.stringify({ message: \'Hello!\' }) }\n);\nconsole.log(await res.json());';
@@ -1087,7 +1207,6 @@ function renderExamples() {
     '</div>';
 }
 
-// ── UI helpers 
 function sw(name) {
   ['logs','playground','webhooks','examples'].forEach(function(n) {
     document.getElementById('t-'+n).classList.toggle('on', n===name);
@@ -1136,7 +1255,6 @@ boot();
 </body>
 </html>`;
 }
-
 
 function docsHTML() {
   return `<!DOCTYPE html>
@@ -1271,10 +1389,9 @@ npm start              # visit http://localhost:3000</pre>
     </table>
     <pre>curl -X POST "https://wpsent.xyz/send?clientid=YOUR_CID&key=YOUR_KEY&to=8801711000000" \\
   -H "Content-Type: application/json" \\
-  -d '{"message": "Hello!"}'
-
-// Response
-{ "ok": true, "logId": "64f3a..." }</pre>
+  -d '{"message": "Hello!"}'</pre>
+    <p>Response:</p>
+    <pre>{ "ok": true, "logId": "64f3a..." }</pre>
 
     <h2 id="logs">Message Logs</h2>
     <p><span class="mt get">GET</span><code>/logs</code> &mdash; last 100 messages, oldest auto-deleted.</p>
@@ -1282,8 +1399,8 @@ npm start              # visit http://localhost:3000</pre>
 
     <h2 id="status">Connection Status</h2>
     <p><span class="mt get">GET</span><code>/status</code></p>
-    <pre>{ "phone": "8801711000000", "status": "ready" }
-// status values: initializing | qr_ready | ready | disconnected | auth_failure | error</pre>
+    <pre>{ "phone": "8801711000000", "status": "ready" }</pre>
+    <p>Status values: <code>initializing</code>, <code>qr_ready</code>, <code>ready</code>, <code>disconnected</code>, <code>auth_failure</code>, <code>error</code>.</p>
 
     <h2 id="webhooks">Webhooks</h2>
     <p>Add URLs to receive a request on every inbound message. Query params in your URL are preserved.</p>
