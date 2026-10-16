@@ -8,19 +8,18 @@ const { execSync }           = require('child_process');
 const fs                     = require('fs');
 const path                   = require('path');
 
-const sessions     = new Map(); 
+const sessions     = new Map();
 const qrCallbacks  = new Map();
-const logListeners = new Map(); 
-const reconnectTimers = new Map(); 
-const retryCount      = new Map(); 
-const pairedAtMap     = new Map(); 
+const logListeners = new Map();
+const reconnectTimers = new Map();
+const retryCount      = new Map();
+const pairedAtMap     = new Map();
 
 const RECONNECT_MS = Number(process.env.WA_RECONNECT_MS) || 5000;
 const STAGGER_MS   = Number(process.env.WA_STAGGER_MS)   || 3000;
 const MAX_RETRIES  = 10;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-//  ENOENT guard (RemoteAuth zip race on first sync) ─
 const _origEmit = process.emit.bind(process);
 process.emit = function(event, error, ...args) {
   if (event === 'uncaughtException' && error?.code === 'ENOENT' && error?.path?.includes('RemoteAuth-')) {
@@ -30,7 +29,6 @@ process.emit = function(event, error, ...args) {
   return _origEmit(event, error, ...args);
 };
 
-//  browser detection 
 function isRealBrowser(p) {
   try {
     execSync(`test -f "${p}"`, { stdio: 'ignore' });
@@ -43,7 +41,7 @@ function isRealBrowser(p) {
 
 function findBrowser() {
   const candidates = [
-    '/nix/var/nix/profiles/default/bin/chromium',  // Railway
+    '/nix/var/nix/profiles/default/bin/chromium',
     '/usr/bin/google-chrome-stable',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
@@ -59,7 +57,6 @@ function findBrowser() {
 
 const BROWSER_PATH = findBrowser();
 
-//  helpers ─
 function sanitizePhone(raw) {
   return String(raw).replace(/[^0-9]/g, '');
 }
@@ -128,10 +125,11 @@ async function teardown(phone) {
   const s = sessions.get(phone);
   sessions.delete(phone);
   if (!s) return;
-  s.destroyed = true;              
+  s.destroyed = true;
+  try { clearInterval(s.auth.backupSync); } catch (_) {}
   try { await Promise.race([s.client.destroy(), sleep(10_000)]); } catch (_) {}
+  try { clearInterval(s.auth.backupSync); } catch (_) {}
 }
-
 
 function scheduleReconnect(phone, delay = RECONNECT_MS) {
   if (reconnectTimers.has(phone)) return;
@@ -139,17 +137,15 @@ function scheduleReconnect(phone, delay = RECONNECT_MS) {
   if (s) s.reconnecting = true;
   reconnectTimers.set(phone, setTimeout(async () => {
     reconnectTimers.delete(phone);
-    await teardown(phone);         
+    await teardown(phone);
     createSession(phone);
   }, delay));
 }
 
-//  session factory 
 function createSession(phone) {
   const existing = sessions.get(phone);
   if (existing) {
     if (existing.status !== 'error' || existing.reconnecting) return existing;
-  
     existing.destroyed = true;
     sessions.delete(phone);
     existing.client.destroy().catch(() => {});
@@ -160,7 +156,6 @@ function createSession(phone) {
       clientId:             phone,
       store,
       dataPath:             '/tmp',
-      
       backupSyncIntervalMs: 60_000
     });
   const client = new Client({
@@ -183,7 +178,7 @@ function createSession(phone) {
     if (session.destroyed) return;
     session.qr        = qr;
     session.status    = 'qr_ready';
-    session.needsPair = true;       // a QR was needed → the next 'ready' is a fresh pairing
+    session.needsPair = true;
     (qrCallbacks.get(phone) || []).forEach(fn => { try { fn(qr); } catch (_) {} });
   });
 
@@ -192,7 +187,7 @@ function createSession(phone) {
     session.status = 'ready';
     session.qr     = null;
     retryCount.delete(phone);
-    if (session.needsPair) {      
+    if (session.needsPair) {
       pairedAtMap.set(phone, Date.now());
       session.needsPair = false;
     }
@@ -230,7 +225,6 @@ function createSession(phone) {
 
   client.on('message', async (msg) => {
     try {
-    
       if (msg.from === 'status@broadcast' || msg.isStatus) return;
       const user = await WpUser.findOne({ phone });
       if (!user) return;
@@ -259,7 +253,6 @@ function createSession(phone) {
     if (session.destroyed) return;
     console.error(`[WA] Init error for ${phone}:`, err.message);
     session.status = 'error';
-    
     const n = (retryCount.get(phone) || 0) + 1;
     retryCount.set(phone, n);
     if (n <= MAX_RETRIES) scheduleReconnect(phone, Math.min(RECONNECT_MS * 2 ** (n - 1), 5 * 60_000));
@@ -269,20 +262,54 @@ function createSession(phone) {
   return session;
 }
 
-//  destroy 
+const AUTH_ROOT = '/tmp';
+
+function removePath(p) {
+  try { fs.rmSync(p, { recursive: true, force: true }); } catch (_) {}
+}
+
+function wipeLocalFiles(phone) {
+  const name = `RemoteAuth-${phone}`;
+  removePath(path.join(AUTH_ROOT, name));
+  removePath(path.join(AUTH_ROOT, `${name}.zip`));
+  removePath(path.join(process.cwd(), `${name}.zip`));
+}
 
 async function wipeRemoteSession(phone) {
   const name = `RemoteAuth-${phone}`;
   try { await new MongoStore({ mongoose }).delete({ session: name }); }
-  catch (e) { console.warn(`[WA] Could not delete remote session ${name}:`, e.message); }
-  for (const p of [path.join('/tmp', name), `${name}.zip`, path.join('/tmp', `${name}.zip`)]) {
-    try { fs.rmSync(p, { recursive: true, force: true }); } catch (_) {}
+  catch (e) { console.warn(`[WA] Could not delete remote session for ${phone}:`, e.message); }
+  const db = mongoose.connection && mongoose.connection.db;
+  if (db) {
+    for (const part of ['files', 'chunks']) {
+      try { await db.collection(`whatsapp-${name}.${part}`).deleteMany({}); }
+      catch (e) { console.warn(`[WA] Could not clear ${name}.${part}:`, e.message); }
+    }
   }
+  wipeLocalFiles(phone);
+}
+
+function cleanupStaleFiles() {
+  let removed = 0;
+  let entries = [];
+  try { entries = fs.readdirSync(AUTH_ROOT); } catch (_) {}
+  for (const e of entries) {
+    if (/^RemoteAuth(-\d+)?(\.zip)?$/.test(e) || /^puppeteer_dev_chrome_profile-/.test(e)) {
+      removePath(path.join(AUTH_ROOT, e));
+      removed++;
+    }
+  }
+  try {
+    for (const e of fs.readdirSync(process.cwd())) {
+      if (/^RemoteAuth(-\d+)?\.zip$/.test(e)) { removePath(path.join(process.cwd(), e)); removed++; }
+    }
+  } catch (_) {}
+  if (removed) console.log(`[WA] Cleaned ${removed} leftover session file(s)`);
 }
 
 async function destroySession(phone, { wipe = false } = {}) {
   const t = reconnectTimers.get(phone);
-  if (t) { clearTimeout(t); reconnectTimers.delete(phone); }   // don't resurrect it
+  if (t) { clearTimeout(t); reconnectTimers.delete(phone); }
   await teardown(phone);
   qrCallbacks.delete(phone);
   retryCount.delete(phone);
@@ -291,12 +318,14 @@ async function destroySession(phone, { wipe = false } = {}) {
   console.log(`[WA] Session destroyed${wipe ? ' (remote session wiped)' : ''}: ${phone}`);
 }
 
-//  public API ─
+async function rescanSession(phone) {
+  await destroySession(phone, { wipe: true });
+  return createSession(phone);
+}
+
 function getSession(phone) { return sessions.get(phone) || null; }
 function getStatus(phone)  { return sessions.get(phone)?.status || 'not_started'; }
-
 function getPairedAt(phone) { return pairedAtMap.get(phone) || 0; }
-
 function getOwnId(phone) {
   return sessions.get(phone)?.client?.info?.wid?._serialized || `${sanitizePhone(phone)}@c.us`;
 }
@@ -342,12 +371,11 @@ async function sendMessage(phone, to, body) {
   }
 }
 
-
 async function shutdown() {
   for (const t of reconnectTimers.values()) clearTimeout(t);
   reconnectTimers.clear();
   await Promise.allSettled([...sessions.entries()].map(async ([phone, s]) => {
-    s.destroyed = true;                                   // no reconnects while closing
+    s.destroyed = true;
     if (s.status === 'ready') {
       try {
         await Promise.race([s.auth.storeRemoteSession({ emit: false }), sleep(20_000)]);
@@ -359,6 +387,7 @@ async function shutdown() {
 }
 
 async function restoreAllSessions() {
+  cleanupStaleFiles();
   const users = await WpUser.find({}).select('phone').lean();
   users.forEach((u, i) => setTimeout(() => {
     console.log(`[WA] Restoring session: ${u.phone}`);
@@ -368,7 +397,7 @@ async function restoreAllSessions() {
 }
 
 module.exports = {
-  createSession, destroySession, getSession, getStatus, getPairedAt, getOwnId,
+  createSession, destroySession, rescanSession, getSession, getStatus, getPairedAt, getOwnId,
   onQR, offQR, sendMessage, restoreAllSessions,
   pruneOldLogs, sanitizePhone, onLog, offLog, emitLog, shutdown
 };
